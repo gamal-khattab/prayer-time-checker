@@ -13,10 +13,11 @@
     .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     select, button { padding: 10px; font-size: 16px; }
     .card { margin-top: 15px; padding: 12px; border: 1px solid #ddd; border-radius: 10px; }
-    #status { font-size: 18px; font-weight: 700; }
+    #status { font-size: 18px; font-weight: 800; }
     .muted { color: #666; font-size: 14px; margin-top: 6px; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
     td, th { border-bottom: 1px solid #eee; padding: 8px; text-align: right; }
+    th { font-weight: 700; }
   </style>
 </head>
 
@@ -26,7 +27,6 @@
   <div class="row">
     <label for="city">اختر المحافظة/المدينة:</label>
 
-    <!-- ✅ SELECT بالمناطق (كما طلبت) -->
     <select id="city">
       <optgroup label="منطقة الرياض">
         <option value="Riyadh">الرياض</option>
@@ -142,11 +142,12 @@ const TIMEZONE = "Asia/Riyadh"; // توقيت السعودية
 const BEFORE_MIN = 10;
 const AFTER_MIN  = 20;
 
-// الصلوات اللي هنفحصها
+// الصلوات
 const PRAYERS = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
 
+// ========== API ==========
 async function fetchTimings(city) {
-  // ✅ نجبره يجيب مواقيت "تاريخ اليوم" بتوقيت السعودية (أفضل من الافتراضي)
+  // ✅ نثبت تاريخ اليوم بتوقيت السعودية لضمان أحدث مواقيت اليوم
   const today = DateTime.now().setZone(TIMEZONE).toFormat("yyyy-LL-dd");
   const url = `https://api.aladhan.com/v1/timingsByCity/${today}?city=${encodeURIComponent(city)}&country=${COUNTRY}&method=${METHOD}`;
 
@@ -157,32 +158,48 @@ async function fetchTimings(city) {
   return data;
 }
 
+// ========== Helpers ==========
 function parseHHMMtoDT(hhmm, baseDate) {
-  // بعض القيم تأتي مثل "05:12 (AST)" أو "05:12"
-  const clean = (hhmm || "").split(" ")[0].trim();
+  const clean = (hhmm || "").split(" ")[0].trim(); // "05:12 (AST)" -> "05:12"
   const [h, m] = clean.split(":").map(Number);
   return baseDate.set({ hour: h, minute: m, second: 0, millisecond: 0 });
 }
 
-function formatWindow(dtStart, dtEnd) {
-  return `${dtStart.toFormat("HH:mm")} → ${dtEnd.toFormat("HH:mm")}`;
+// ✅ عرض مناسب RTL (لا ينقلب)
+function formatWindowText(startHHMM, endHHMM) {
+  return `${startHHMM} → ${endHHMM}`;
 }
 
+// تحويل DateTime إلى دقائق منذ منتصف الليل
+function toMinutes(dt) {
+  return dt.hour * 60 + dt.minute;
+}
+
+// تحويل "HH:mm" إلى دقائق منذ منتصف الليل
+function parseToMinutes(hhmm) {
+  const clean = (hhmm || "").split(" ")[0].trim();
+  const [h, m] = clean.split(":").map(Number);
+  return h * 60 + m;
+}
+
+// ========== Render Table ==========
 function renderTable(baseDate, timings) {
   const table = document.getElementById("timesTable");
   const tbody = table.querySelector("tbody");
   tbody.innerHTML = "";
 
   PRAYERS.forEach(p => {
-    const dt = parseHHMMtoDT(timings[p], baseDate);
-    const wStart = dt.minus({ minutes: BEFORE_MIN });
-    const wEnd   = dt.plus({ minutes: AFTER_MIN });
+    const prayerDT = parseHHMMtoDT(timings[p], baseDate);
+
+    // للعرض: HH:mm فقط
+    const startDT = prayerDT.minus({ minutes: BEFORE_MIN });
+    const endDT   = prayerDT.plus({ minutes: AFTER_MIN });
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${p}</td>
-      <td>${dt.toFormat("HH:mm")}</td>
-      <td>${formatWindow(wStart, wEnd)}</td>
+      <td>${prayerDT.toFormat("HH:mm")}</td>
+      <td>${formatWindowText(startDT.toFormat("HH:mm"), endDT.toFormat("HH:mm"))}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -190,22 +207,40 @@ function renderTable(baseDate, timings) {
   table.style.display = "";
 }
 
-function checkNow(baseDate, timings) {
+// ========== Core Check (✅ شامل أول دقيقة وآخر دقيقة) ==========
+// ⚡ الحل النهائي: مقارنة بالدقائق فقط (بدون ثواني)
+function checkNow(timings) {
   const now = DateTime.now().setZone(TIMEZONE);
+  const nowMin = toMinutes(now); // الدقيقة الحالية فقط
 
   for (const p of PRAYERS) {
-    const dt = parseHHMMtoDT(timings[p], baseDate);
-    const start = dt.minus({ minutes: BEFORE_MIN });
-    const end   = dt.plus({ minutes: AFTER_MIN });
+    const prayerMin = parseToMinutes(timings[p]);
 
-    if (now >= start && now <= end) {
-      return { inPrayerWindow: true, prayer: p, now, start, end, prayerTime: dt };
+    const startMin = prayerMin - BEFORE_MIN;
+    const endMin   = prayerMin + AFTER_MIN;
+
+    // ✅ inclusive: أول دقيقة وآخر دقيقة محسوبين
+    if (nowMin >= startMin && nowMin <= endMin) {
+      return { inPrayerWindow: true, prayer: p, now, nowMin, startMin, endMin, prayerMin };
     }
   }
 
-  return { inPrayerWindow: false, now };
+  return { inPrayerWindow: false, now, nowMin };
 }
 
+// تحويل دقائق إلى "HH:mm" للعرض
+function minutesToHHMM(mins) {
+  // احتياط لو صارت سالبة أو أكبر من 24 ساعة (نادر مع نافذتك)
+  let m = mins;
+  while (m < 0) m += 1440;
+  while (m >= 1440) m -= 1440;
+
+  const hh = String(Math.floor(m / 60)).padStart(2, "0");
+  const mm = String(m % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+// ========== UI Action ==========
 document.getElementById("checkBtn").addEventListener("click", async () => {
   const status = document.getElementById("status");
   const meta = document.getElementById("meta");
@@ -218,20 +253,23 @@ document.getElementById("checkBtn").addEventListener("click", async () => {
     const apiData = await fetchTimings(city);
     const timings = apiData.data.timings;
 
-    // تاريخ اليوم في توقيت السعودية
+    // تاريخ اليوم لتكوين أوقات العرض فقط
     const baseDate = DateTime.now().setZone(TIMEZONE).startOf("day");
 
-    // عرض جدول المواقيت
     renderTable(baseDate, timings);
 
-    // فحص هل الآن داخل نافذة صلاة
-    const result = checkNow(baseDate, timings);
+    const result = checkNow(timings);
 
-    meta.textContent = `المدينة: ${city} — الآن (السعودية): ${result.now.toFormat("yyyy-LL-dd HH:mm")}`;
+    meta.textContent =
+      `المدينة: ${city} — الآن (السعودية): ${result.now.toFormat("yyyy-LL-dd HH:mm:ss")} — (مقارنة بالدقيقة: ${minutesToHHMM(result.nowMin)})`;
 
     if (result.inPrayerWindow) {
+      const startHH = minutesToHHMM(result.startMin);
+      const endHH   = minutesToHHMM(result.endMin);
+      const prayerHH = minutesToHHMM(result.prayerMin);
+
       status.textContent =
-        `✅ الآن موعد صلاة: ${result.prayer} (وقت الصلاة ${result.prayerTime.toFormat("HH:mm")}) — ضمن النافذة ${result.start.toFormat("HH:mm")} → ${result.end.toFormat("HH:mm")}`;
+        `✅ الآن موعد صلاة: ${result.prayer} (وقت الصلاة ${prayerHH}) — ${formatWindowText(startHH, endHH)} (شامل البداية والنهاية)`;
     } else {
       status.textContent = `❌ ليس موعد صلاة الآن`;
     }
